@@ -1,6 +1,7 @@
 package simpleton
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -11,9 +12,7 @@ import (
 	"github.com/golang/snappy"
 )
 
-type EncodingFunc func([]byte) []byte
-type DecodingFunc func([]byte) []byte
-
+// Engine is the storage engine structure for simpleton. It implements the below KVStore interface.
 type Engine struct {
 	rwlock      sync.RWMutex
 	f           *os.File
@@ -22,6 +21,21 @@ type Engine struct {
 	decf        DecodingFunc
 }
 
+// KVStore is the interface that is implemented by the Engine structure of simpleton.
+// This is currently for documentation purposes only.
+type KVStore interface {
+	Get(key string) (string, error)
+	Put(key, value string) error
+}
+
+// EncodingFunc is a function that encodes keys and values before they are written to persistence layer.
+type EncodingFunc func([]byte) []byte
+
+// DecodingFunc is a function that decodes encoded keys and values that are retrieved from persistence layer.
+type DecodingFunc func([]byte) []byte
+
+// SnappyDecodingFunc utilizes snappy to decode keys and values that are retrieved from persistence layer
+// and is currently the default decoding function.
 var SnappyDecodingFunc DecodingFunc = func(b []byte) []byte {
 	d, err := snappy.Decode(nil, b)
 	if err != nil {
@@ -30,21 +44,44 @@ var SnappyDecodingFunc DecodingFunc = func(b []byte) []byte {
 	return d
 }
 
+// SnappyEncodingFunc utilizes snappy to encode keys and values before they are written to persistence layer
+// and is currently the default encoding function.
 var SnappyEncodingFunc EncodingFunc = func(b []byte) []byte {
 	return snappy.Encode(nil, b)
 }
 
+// NewEngine returns a new Engine structure.
+// If either encoding function or decoding function is not provided, default snappy functions are used.
+// Whether or not encoding and decoding functions complement each other is tested with a basic string encode then decode
+// test. This same string is currently persisted in the header as well to try make sure that when an existing simpleton file
+// is opened again, the previous encoding function is the same as current one.
 func NewEngine(f *os.File, encf EncodingFunc, decf DecodingFunc) (*Engine, error) {
 	if encf == nil || decf == nil {
 		encf = SnappyEncodingFunc
 		decf = SnappyDecodingFunc
 	}
+	teststr := `
+	This is a test string for encoding and decoding functions. 
+	I do know that it's not the best way to make sure that encoding and decoding functions complement each other,
+	but this is what I could come up with at this point in time.
+	123456789
+	!@#$%^
+	{}{}{}{}{}{}
+	[][][][][][]
+	()()()()()()
+	`
+	encodedteststr := encf([]byte(teststr))
+	encdecresultstr := decf(encodedteststr)
+	if teststr != string(encdecresultstr) {
+		panic("encoding and decoding functions do not complement each other")
+	}
+
 	e := &Engine{
 		f:    f,
 		encf: encf,
 		decf: decf,
 	}
-	return e, e.init()
+	return e, e.init(encodedteststr)
 }
 
 type operation int
@@ -53,42 +90,6 @@ const (
 	write operation = iota
 	remove
 )
-
-func (e *Engine) init() error {
-	e.rwlock.Lock()
-	defer e.rwlock.Unlock()
-	e.keyToOffset = make(map[string]int64)
-	endOffset, err := e.f.Seek(0, 2)
-	if err != nil {
-		return err
-	}
-	if endOffset == 0 {
-		return nil
-	}
-	if _, err := e.f.Seek(0, 0); err != nil {
-		return err
-	}
-
-	offset := int64(0)
-	buf := make([]byte, 8)
-	for {
-		op, encKey, nextOffset, err := e.readNextKey(offset, buf)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			panic(err)
-		}
-		key := string(e.decf(encKey))
-		if op == write {
-			e.keyToOffset[key] = offset
-		} else {
-			delete(e.keyToOffset, key)
-		}
-		offset = nextOffset
-	}
-	return nil
-}
 
 func (e *Engine) Get(key string) (string, error) {
 	e.rwlock.RLock()
@@ -148,6 +149,54 @@ func (e *Engine) Put(key, value string) error {
 		return err
 	}
 	e.keyToOffset[key] = o
+	return nil
+}
+
+func (e *Engine) init(encodedteststr []byte) error {
+	e.rwlock.Lock()
+	defer e.rwlock.Unlock()
+	e.keyToOffset = make(map[string]int64)
+	endOffset, err := e.f.Seek(0, 2)
+	if err != nil {
+		return err
+	}
+	if endOffset == 0 {
+		if _, err := e.f.Write(encodedteststr); err != nil {
+			panic(err)
+		}
+		return e.f.Sync()
+	}
+	if _, err := e.f.Seek(0, 0); err != nil {
+		return err
+	}
+
+	offset := int64(0)
+	testbuf := make([]byte, len(encodedteststr))
+	_, err = e.f.Read(testbuf)
+	if err != nil {
+		panic(err)
+	}
+	if bytes.Compare(encodedteststr, testbuf) != 0 {
+		panic("database file could be corrupt or invalid encoding and decoding functions are provided")
+	}
+	offset += int64(len(testbuf))
+	buf := make([]byte, 8)
+	for {
+		op, encKey, nextOffset, err := e.readNextKey(offset, buf)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			panic(err)
+		}
+		key := string(e.decf(encKey))
+		if op == write {
+			e.keyToOffset[key] = offset
+		} else {
+			delete(e.keyToOffset, key)
+		}
+		offset = nextOffset
+	}
 	return nil
 }
 

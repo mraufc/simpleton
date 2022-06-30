@@ -37,7 +37,7 @@ func TestEngine_Get(t *testing.T) {
 	}
 }
 
-func ExampleEngine_Get() {
+func ExampleNewEngine() {
 	f, err := ioutil.TempFile("./", "simpleton-")
 	if err != nil {
 		log.Fatalln(err)
@@ -64,4 +64,50 @@ func ExampleEngine_Get() {
 	// Output:
 	// key not found example_key
 	// value retrieved from database is correct: true
+}
+
+func ExampleNewEngine_reopen() {
+	f, err := ioutil.TempFile("./", "simpleton-")
+	if err != nil {
+		log.Fatalln(err)
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	e, err := simpleton.NewEngine(f, nil, nil)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	key, value := "example_key", "example_value"
+	_, err = e.Get(key)
+	fmt.Println(err)
+	if err := e.Put(key, value); err != nil {
+		log.Fatalln(err)
+	}
+	v, err := e.Get(key)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	fmt.Printf("value retrieved from database is correct: %v\n", v == value)
+
+	f.Close()
+	f2, err := os.OpenFile(name, os.O_RDWR, 0644)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f2.Close()
+	e2, err := simpleton.NewEngine(f2, nil, nil)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	v2, err := e2.Get(key)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	fmt.Printf("value retrieved from re-opened database is correct: %v\n", v2 == value)
+
+	// Output:
+	// key not found example_key
+	// value retrieved from database is correct: true
+	// value retrieved from re-opened database is correct: true
 }
